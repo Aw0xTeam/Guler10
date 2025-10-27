@@ -30,10 +30,9 @@ TELEGRAM_CHAT_ID = "-4954506825"
 
 LOGIN_URL = "https://www.orangecarrier.com/login"
 HUB_BASE_URL = "https://hub.orangecarrier.com"
-LIVE_CALLS_URL = f"{HUB_BASE_URL}/"
 WS_BASE = "wss://hub.orangecarrier.com/socket.io/"
 
-HEARTBEAT_INTERVAL = 15 # Rage shi don aikawa da Pong da sauri
+HEARTBEAT_INTERVAL = 15 
 RECONNECT_DELAY = 15
 # ----------------------------------------
 
@@ -79,7 +78,7 @@ class OrangeCarrierMonitor:
         """Initialize Chrome driver with visible browser"""
         try:
             chrome_options = Options()
-            # chrome_options.add_argument("--headless") # Yana iya taimakawa idan baka so ya nuna
+            # chrome_options.add_argument("--headless") # Zaka iya kashe shi idan kana so ka ga browser
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--disable-blink-features=AutomationControlled")
@@ -116,44 +115,17 @@ class OrangeCarrierMonitor:
             
             # --- Input Fields & Button Click ---
             
-            # Find email field
-            email_selectors = [(By.NAME, "email"), (By.ID, "email"), (By.CSS_SELECTOR, "input[type='email']")]
-            email_field = None
-            for by, selector in email_selectors:
-                try:
-                    email_field = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((by, selector)))
-                    if email_field: break
-                except TimeoutException: continue
-            if not email_field: raise Exception("Email field not found")
+            email_field = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.NAME, "email")))
             email_field.clear()
             email_field.send_keys(self.email)
             
-            # Find password field
-            password_selectors = [(By.NAME, "password"), (By.ID, "password"), (By.CSS_SELECTOR, "input[type='password']")]
-            password_field = None
-            for by, selector in password_selectors:
-                try:
-                    password_field = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((by, selector)))
-                    if password_field: break
-                except TimeoutException: continue
-            if not password_field: raise Exception("Password field not found")
+            password_field = WebDriverWait(self.driver, 5).until(EC.presence_of_element_located((By.NAME, "password")))
             password_field.clear()
             password_field.send_keys(self.password)
             
-            # Find and click login button
-            login_button = None
-            selectors = ["button[type='submit']", "input[type='submit']", "//button[contains(text(), 'Login')]", "button.btn-primary"]
-            for selector in selectors:
-                try:
-                    if selector.startswith("//"): login_button = self.driver.find_element(By.XPATH, selector)
-                    else: login_button = self.driver.find_element(By.CSS_SELECTOR, selector)
-                    if login_button.is_displayed() and login_button.is_enabled(): break
-                    else: login_button = None
-                except NoSuchElementException: continue
+            login_button = WebDriverWait(self.driver, 5).until(EC.element_to_be_clickable((By.CSS_SELECTOR, "button[type='submit']")))
             
-            if not login_button: raise Exception("Login button not found")
-            
-            logging.info("🖱️ Clicking login button...")
+            logging.info("🖱️ Clicking login button... (This may take a moment)")
             self.driver.execute_script("arguments[0].click();", login_button)
             
             # Wait for navigation and check for success
@@ -164,7 +136,12 @@ class OrangeCarrierMonitor:
             if "orangecarrier.com" in current_url and "login" not in current_url:
                 logging.info("✅ Login successful - redirected to dashboard")
                 
-                # *** GYARA NA 1: Tura Browser zuwa Hub URL don Ɗaukar Duk Cookies/JS Data ***
+                # Ciro Token daga URL idan akwai
+                auth_match = re.search(r'auth=([^&]+)', self.driver.current_url)
+                if auth_match:
+                    logging.info("⭐ Found 'auth' parameter in URL. This may contain the token.")
+                    
+                # Navigating to Hub URL don ɗaukar duk Cookies/JS Data
                 if self.hub_base_url not in self.driver.current_url:
                     logging.info(f"🔄 Navigating to Hub URL: {self.hub_base_url}")
                     self.driver.get(self.hub_base_url)
@@ -173,6 +150,8 @@ class OrangeCarrierMonitor:
                 return True
             else:
                 logging.error("❌ Login failed (still on login page or error page)")
+                # Ƙara Screenshot don Debugging
+                self.driver.save_screenshot("login_failed.png")
                 return False
                 
         except Exception as e:
@@ -211,27 +190,53 @@ class OrangeCarrierMonitor:
 
     def get_websocket_token_via_selenium(self):
         """
-        GYARAR CIKAKKE: Extract WebSocket token and User ID using Selenium 
-        to execute JavaScript from the fully loaded Hub page.
+        *** GYARAR MAHIMMANCI: Ingantacciyar hanyar ciro WebSocket token da User ID ***
         """
         try:
             logging.info("🔍 Extracting WebSocket token and User ID using JS...")
-
-            # 1. Ciro JWT Token
-            js_token = "return localStorage.getItem('auth_token') || localStorage.getItem('token') || '';"
+            
+            # ---------------------------
+            # --- 1. Ciro JWT Token ---
+            # ---------------------------
+            js_token = """
+                let token = localStorage.getItem('auth_token') || localStorage.getItem('token') || '';
+                
+                // Gwajin JSON: Gwada ciro token daga auth_data (wanda yakan zama JSON)
+                if (token.length < 20) {
+                    try {
+                        let authData = JSON.parse(localStorage.getItem('auth_data') || '{}');
+                        token = authData.token || authData.auth_token || '';
+                    } catch (e) {}
+                }
+                
+                // Gano duk wani abu mai kama da Token (idan key ya canza)
+                if (token.length < 20) {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        let key = localStorage.key(i);
+                        // Bincika key mai dauke da 'token' ko 'auth' kuma value mai tsayi
+                        let value = localStorage.getItem(key);
+                        if ((key.includes('token') || key.includes('auth')) && (value.length > 20 && value.includes('.'))) {
+                            token = value;
+                            break;
+                        }
+                    }
+                }
+                return token;
+            """
             token = self.driver.execute_script(js_token)
 
-            # 2. Ciro User ID
+            # ---------------------------
+            # --- 2. Ciro User ID ---
+            # ---------------------------
             js_user_id = """
                 let userId = localStorage.getItem('user_id') || '';
                 if (!userId) {
                     try {
                         let authData = JSON.parse(localStorage.getItem('auth_data') || '{}');
-                        userId = authData.user_id || '';
+                        userId = authData.user_id || authData.id || '';
                     } catch (e) { }
                 }
                 if (!userId) {
-                    // Neman ID daga wani variable na JS
                     userId = window.userId || (window.app && window.app.user_id) || '';
                 }
                 return userId;
@@ -244,13 +249,21 @@ class OrangeCarrierMonitor:
                 if user_match_content:
                     user_id = user_match_content.group(1)
             
-            # Idan an samu Token da User ID
-            if token and len(token) > 20 and user_id and len(user_id) > 10:
+            # --- Tabbatarwa ---
+            token_valid = token and len(token) > 20
+            user_id_valid = user_id and len(user_id) > 10
+            
+            if token_valid and user_id_valid:
                 ws_params = f"token={token}&user={user_id}&EIO=4&transport=websocket"
-                logging.info(f"✅ Extracted WebSocket params successfully. User ID: {user_id[:8]}...")
+                self.auth_token = token 
+                logging.info(f"✅ Extracted WebSocket params successfully. Token: {token[:10]}... User ID: {user_id[:8]}...")
                 return ws_params
             
-            logging.error(f"❌ Could not find a valid token or user ID. Token found: {bool(token)}, User ID found: {bool(user_id)}")
+            logging.error(f"❌ Could not find a valid token or user ID. Token found: {token_valid}, User ID found: {user_id_valid}")
+            
+            # Ƙara Screenshot don debugging
+            self.driver.save_screenshot("token_extraction_failed.png")
+            
             return None
 
         except Exception as e:
@@ -262,17 +275,15 @@ class OrangeCarrierMonitor:
         return self.get_websocket_token_via_selenium()
 
     def parse_socketio_message(self, msg):
-        """
-        GYARAR CIKAKKE: Handle Socket.IO messages, especially the Ping/Pong heartbeat.
-        """
+        """Handle Socket.IO messages, especially the Ping/Pong heartbeat."""
         if not msg: return
             
         if msg == "2":
-            # Wannan shine Heartbeat (Ping). Amsa da Pong (3) nan take.
+            # GYARA: Amsa Ping (2) da Pong (3) nan take.
             try:
                 if self._ws:
                     self._ws.send("3")
-                    logging.debug("✅ Sent pong")
+                    logging.debug("✅ Sent pong (Heartbeat)")
             except Exception as e:
                 logging.error(f"❌ Failed to send pong: {e}")
             return
@@ -282,10 +293,8 @@ class OrangeCarrierMonitor:
                 data = json.loads(msg[1:])
                 self.sid = data.get('sid')
                 logging.info(f"🔗 Connection established with SID: {self.sid}")
-                logging.info("✅ WebSocket connected successfully")
                 
-                # Sai a aika da sako na JOIN USER ROOM don fara karban Events.
-                # Wannan bayanin ya fito daga HTTP Polling logs da ka bayar:
+                # Aika sako na JOIN USER ROOM don fara karban Events.
                 join_msg = f'42["join_user_room",{{"room": "user: {self.email}:orange: internal"}}]'
                 self._ws.send(join_msg)
                 logging.info("➡️ Sent join_user_room event.")
@@ -306,7 +315,7 @@ class OrangeCarrierMonitor:
                     elif event == "call_update":
                         self.handle_call_update(event_payload)
                     elif event in ["join_user_room", "authenticated", "connected"]:
-                        logging.info(f"✅ Successfully {event}")
+                        logging.info(f"✅ Successfully processed event: {event}")
                     elif event == "error":
                         logging.error(f"❌ SocketIO error: {event_payload}")
                     else:
@@ -349,17 +358,13 @@ class OrangeCarrierMonitor:
             logging.error(f"❌ Failed to send telegram: {e}")
 
     def _build_ws_headers(self):
-        """
-        GYARAR CIKAKKE: Tabbatar an saka cookies masu mahimmanci da kuma Authorization header.
-        """
+        """Tabbatar an saka cookies masu mahimmanci da kuma Authorization header."""
         cookies = self.session.cookies.get_dict()
         
-        # Tace cookies don rage yawan bayanan da ba dole ba. Waɗannan yawanci suna da mahimmanci.
         filtered_cookies = {k: v for k, v in cookies.items() if k in ['laravel_session', 'XSRF-TOKEN', 'jwt', 'user_session', 'token']}
         cookie_header = "; ".join(f"{k}={v}" for k, v in filtered_cookies.items())
 
         headers = {
-            # User-Agent mai kama da browser
             "User-Agent": 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             "Origin": self.hub_base_url,
             "Accept-Encoding": "gzip, deflate, br",
@@ -369,12 +374,9 @@ class OrangeCarrierMonitor:
         if cookie_header:
             headers["Cookie"] = cookie_header
 
-        # Saka Authorization header idan an samo token (mai yiwuwa ne sabar tana so)
-        if self.ws_token_params:
-             token_match = re.search(r'token=([^&]+)', self.ws_token_params)
-             if token_match:
-                 token = token_match.group(1)
-                 headers['Authorization'] = f'Bearer {token}'
+        # Saka Authorization header idan an samo token
+        if self.auth_token:
+             headers['Authorization'] = f'Bearer {self.auth_token}'
                  
         return [f"{k}: {v}" for k, v in headers.items()]
 
@@ -382,7 +384,6 @@ class OrangeCarrierMonitor:
         logging.info("🔌 WebSocket connection opened")
 
     def on_ws_error(self, ws, error):
-        # Ajiye a matsayin error, amma kar a barshi ya dakatar da komai
         if isinstance(error, Exception):
              logging.error(f"❌ WebSocket error: {error}")
         else:
@@ -393,9 +394,7 @@ class OrangeCarrierMonitor:
         self.sid = None
 
     def _ws_loop(self):
-        """
-        GYARAR CIKAKKE: WebSocket main loop for reconnection and heartbeat settings.
-        """
+        """WebSocket main loop for reconnection and heartbeat settings."""
         while not self._stop_event.is_set():
             ws_params = self.get_websocket_params()
             if not ws_params:
@@ -417,12 +416,10 @@ class OrangeCarrierMonitor:
                     on_open=self.on_ws_open
                 )
                 
-                # Rage ping_interval kuma a rage ping_timeout. 
-                # Wannan zai tilasta shirin ya amsa da sauri ko ya rufe haɗin da sauri idan matsala ce.
                 self._ws.run_forever(
                     ping_interval=HEARTBEAT_INTERVAL, 
                     ping_timeout=5, 
-                    sslopt={"cert_reqs": None} # An kashe SSL checks saboda matsalolin shaidar TLS.
+                    sslopt={"cert_reqs": None} # An kashe SSL checks saboda matsalolin TLS.
                 )
                 
             except Exception as e:
